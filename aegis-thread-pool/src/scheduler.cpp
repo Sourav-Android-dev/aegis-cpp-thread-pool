@@ -52,10 +52,11 @@ void Scheduler::shutdown() {
 }
 
 void Scheduler::register_dependent_task(std::vector<TaskId> dependencies, Priority priority,
-                                        MoveOnlyFunction action) {
+                                        MoveOnlyFunction action,
+                                        std::function<void(std::exception_ptr)> on_failure) {
     std::lock_guard<std::mutex> lock(dep_mutex_);
-    pending_dependents_.push_back(
-        DependentTaskNode{std::move(dependencies), priority, std::move(action)});
+    pending_dependents_.push_back(DependentTaskNode{std::move(dependencies), priority,
+                                                    std::move(action), std::move(on_failure)});
 }
 
 void Scheduler::check_dependent_tasks() {
@@ -68,16 +69,48 @@ void Scheduler::check_dependent_tasks() {
             while (it != pending_dependents_.end()) {
                 auto& node = *it;
                 bool all_completed = true;
+                bool terminal_failure = false;
+                bool was_cancelled = false;
+                std::string error_msg;
 
                 for (TaskId dep_id : node.remaining_dependencies) {
                     auto status = pool_.get_task_status(dep_id);
-                    if (!status.has_value() || *status != TaskStatus::Completed) {
-                        all_completed = false;
+                    if (!status.has_value()) {
+                        terminal_failure = true;
+                        error_msg =
+                            "Prerequisite task ID " + std::to_string(dep_id) + " does not exist.";
                         break;
+                    }
+                    if (*status == TaskStatus::Cancelled) {
+                        terminal_failure = true;
+                        was_cancelled = true;
+                        error_msg =
+                            "Prerequisite task " + std::to_string(dep_id) + " was cancelled.";
+                        break;
+                    }
+                    if (*status == TaskStatus::Failed) {
+                        terminal_failure = true;
+                        error_msg =
+                            "Prerequisite task " + std::to_string(dep_id) + " execution failed.";
+                        break;
+                    }
+                    if (*status != TaskStatus::Completed) {
+                        all_completed = false;
                     }
                 }
 
-                if (all_completed) {
+                if (terminal_failure) {
+                    if (node.on_dependency_failed) {
+                        if (was_cancelled) {
+                            node.on_dependency_failed(
+                                std::make_exception_ptr(TaskCancelledException(error_msg)));
+                        } else {
+                            node.on_dependency_failed(
+                                std::make_exception_ptr(std::runtime_error(error_msg)));
+                        }
+                    }
+                    it = pending_dependents_.erase(it);
+                } else if (all_completed) {
                     ready_to_fire.push_back(std::move(node));
                     it = pending_dependents_.erase(it);
                 } else {

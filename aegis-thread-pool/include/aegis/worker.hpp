@@ -66,6 +66,7 @@ public:
 
     void set_peers(const std::vector<std::shared_ptr<Worker>>& peers);
     WorkStealingQueue* local_queue() noexcept { return local_queue_.get(); }
+    bool push_local(ExecutableTask task);
 
 private:
     void run();
@@ -81,6 +82,7 @@ private:
     std::atomic<uint64_t> tasks_executed_{0};
 
     std::unique_ptr<WorkStealingQueue> local_queue_;
+    mutable std::mutex peers_mutex_;
     std::vector<std::weak_ptr<Worker>> peers_;
 
     std::thread thread_;

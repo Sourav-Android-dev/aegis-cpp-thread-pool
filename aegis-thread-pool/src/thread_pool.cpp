@@ -57,14 +57,14 @@ bool ThreadPool::cancel(TaskId id) {
     }
 
     auto& meta = it->second;
-    TaskStatus current_status = meta->status.load(std::memory_order_relaxed);
-    if (current_status == TaskStatus::Completed || current_status == TaskStatus::Failed ||
-        current_status == TaskStatus::Cancelled) {
+    if (!meta->transition_to_cancelled()) {
         return false;
     }
 
-    meta->cancellation_flag->store(true, std::memory_order_relaxed);
-    meta->status.store(TaskStatus::Cancelled, std::memory_order_relaxed);
+    if (meta->cancel_promise_handler) {
+        meta->cancel_promise_handler("Task was cancelled by user.");
+    }
+
     metrics_.record_task_cancelled();
     return true;
 }
@@ -129,10 +129,10 @@ void ThreadPool::shutdown_immediate() {
 
 void ThreadPool::wait_for_all() {
     while (true) {
-        if (queue_.empty() && active_worker_count() == 0) {
+        if (pending_task_count() == 0 && active_worker_count() == 0) {
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
     }
 }
 
@@ -151,23 +151,40 @@ void ThreadPool::resize(size_t new_worker_count) {
             workers_.push_back(worker);
             worker->start();
         }
+        if (config_.enable_work_stealing) {
+            for (auto& w : workers_) {
+                w->set_peers(workers_);
+            }
+        }
     } else if (new_worker_count < current_count) {
         size_t to_remove = current_count - new_worker_count;
+        std::vector<std::shared_ptr<Worker>> retiring_workers;
+        retiring_workers.reserve(to_remove);
+
         for (size_t i = 0; i < to_remove; ++i) {
-            auto worker = workers_.back();
+            retiring_workers.push_back(workers_.back());
             workers_.pop_back();
+        }
+
+        // Update peers of active workers before retiring old workers
+        if (config_.enable_work_stealing) {
+            for (auto& w : workers_) {
+                w->set_peers(workers_);
+            }
+        }
+
+        // Signal workers to stop (which wakes up queue condition variable)
+        for (auto& worker : retiring_workers) {
             worker->stop();
+        }
+
+        // Join retiring workers (they wake up and exit immediately)
+        for (auto& worker : retiring_workers) {
             worker->join();
         }
     }
 
     metrics_.set_worker_counts(static_cast<uint32_t>(workers_.size()));
-
-    if (config_.enable_work_stealing) {
-        for (auto& w : workers_) {
-            w->set_peers(workers_);
-        }
-    }
 }
 
 bool ThreadPool::is_running() const noexcept {
@@ -202,7 +219,16 @@ size_t ThreadPool::idle_worker_count() const noexcept {
 }
 
 size_t ThreadPool::pending_task_count() const noexcept {
-    return queue_.size();
+    size_t count = queue_.size();
+    if (config_.enable_work_stealing) {
+        std::lock_guard<std::mutex> lock(workers_mutex_);
+        for (const auto& w : workers_) {
+            if (auto lq = w->local_queue()) {
+                count += lq->size();
+            }
+        }
+    }
+    return count;
 }
 
 MetricsSnapshot ThreadPool::metrics() const {

@@ -25,7 +25,8 @@ void Worker::start() {
 }
 
 void Worker::stop() {
-    stop_requested_.store(true, std::memory_order_relaxed);
+    stop_requested_.store(true, std::memory_order_release);
+    global_queue_.wake_all();
 }
 
 void Worker::join() {
@@ -35,12 +36,22 @@ void Worker::join() {
 }
 
 void Worker::set_peers(const std::vector<std::shared_ptr<Worker>>& peers) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
     peers_.clear();
     for (const auto& p : peers) {
         if (p.get() != this) {
             peers_.push_back(p);
         }
     }
+}
+
+bool Worker::push_local(ExecutableTask task) {
+    if (local_queue_) {
+        local_queue_->push(std::move(task));
+        global_queue_.wake_all();
+        return true;
+    }
+    return false;
 }
 
 std::optional<ExecutableTask> Worker::acquire_task() {
@@ -58,15 +69,21 @@ std::optional<ExecutableTask> Worker::acquire_task() {
             return task;
         }
 
-        // 3. Work stealing from peers
-        if (!peers_.empty()) {
+        // 3. Work stealing from peers using thread-safe snapshot
+        std::vector<std::weak_ptr<Worker>> peers_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            peers_snapshot = peers_;
+        }
+
+        if (!peers_snapshot.empty()) {
             thread_local std::mt19937 rng(std::random_device{}());
-            std::uniform_int_distribution<size_t> dist(0, peers_.size() - 1);
+            std::uniform_int_distribution<size_t> dist(0, peers_snapshot.size() - 1);
             size_t start_idx = dist(rng);
 
-            for (size_t i = 0; i < peers_.size(); ++i) {
-                size_t idx = (start_idx + i) % peers_.size();
-                if (auto peer = peers_[idx].lock()) {
+            for (size_t i = 0; i < peers_snapshot.size(); ++i) {
+                size_t idx = (start_idx + i) % peers_snapshot.size();
+                if (auto peer = peers_snapshot[idx].lock()) {
                     if (auto peer_queue = peer->local_queue()) {
                         if (auto stolen = peer_queue->steal()) {
                             return stolen;
@@ -78,13 +95,15 @@ std::optional<ExecutableTask> Worker::acquire_task() {
 
         // Re-try global pop if nothing to steal
         if (global_queue_.is_closed() && global_queue_.empty()) {
-            return std::nullopt;
+            if (!local_queue_ || local_queue_->empty()) {
+                return std::nullopt;
+            }
         }
         return global_queue_.pop_wait_for(std::chrono::milliseconds{50});
     }
 
-    // Standard mode: block until global queue has tasks or closes
-    return global_queue_.pop();
+    // Standard mode: block until global queue has tasks, closes, or worker stop requested
+    return global_queue_.pop(stop_requested_);
 }
 
 void Worker::run() {
@@ -93,8 +112,13 @@ void Worker::run() {
 
         auto opt_task = acquire_task();
         if (!opt_task.has_value()) {
-            if (global_queue_.is_closed() && global_queue_.empty()) {
+            if (stop_requested_.load(std::memory_order_relaxed)) {
                 break;
+            }
+            if (global_queue_.is_closed() && global_queue_.empty()) {
+                if (!local_queue_ || local_queue_->empty()) {
+                    break;
+                }
             }
             continue;
         }
@@ -102,10 +126,14 @@ void Worker::run() {
         auto& task = *opt_task;
 
         if (task.is_cancelled()) {
-            if (task.metadata) {
-                task.metadata->status.store(TaskStatus::Cancelled, std::memory_order_relaxed);
+            // Task was cancelled before execution. Complete its promise and account metric exactly
+            // once.
+            if (task.metadata && task.metadata->transition_to_cancelled()) {
+                metrics_.record_task_cancelled();
             }
-            metrics_.record_task_cancelled();
+            if (task.metadata && task.metadata->cancel_promise_handler) {
+                task.metadata->cancel_promise_handler("Task cancelled prior to execution.");
+            }
             continue;
         }
 

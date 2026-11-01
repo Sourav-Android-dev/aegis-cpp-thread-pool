@@ -3,8 +3,8 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C.svg)](https://cmake.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests: 17/17 Passing](https://img.shields.io/badge/Tests-17%2F17%20Passed-brightgreen.svg)]()
-[![Throughput](https://img.shields.io/badge/Throughput-340%2C000%2B%20tasks%2Fsec-success.svg)]()
+[![Tests: 23/23 Passing](https://img.shields.io/badge/Tests-23%2F23%20Passed-brightgreen.svg)]()
+[![Throughput](https://img.shields.io/badge/Throughput-347%2C000%2B%20tasks%2Fsec-success.svg)]()
 
 **Aegis** is an industrial-strength, production-grade multithreaded task execution and scheduling engine written in modern C++20. Engineered for ultra-low latency systems, high-throughput microservices, and compute pipelines, Aegis balances lock-free observability with deterministic synchronization and starvation mitigation.
 

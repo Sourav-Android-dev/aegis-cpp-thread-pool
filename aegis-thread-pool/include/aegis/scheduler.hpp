@@ -78,8 +78,15 @@ public:
             }
         };
 
+        auto fail_action = [p = prom](std::exception_ptr ex) {
+            try {
+                p->set_exception(ex);
+            } catch (...) {
+            }
+        };
+
         register_dependent_task(std::move(depends_on), priority,
-                                MoveOnlyFunction(std::move(action)));
+                                MoveOnlyFunction(std::move(action)), std::move(fail_action));
         return future;
     }
 
@@ -111,10 +118,12 @@ private:
         std::vector<TaskId> remaining_dependencies;
         Priority priority;
         MoveOnlyFunction action;
+        std::function<void(std::exception_ptr)> on_dependency_failed;
     };
 
     void register_dependent_task(std::vector<TaskId> dependencies, Priority priority,
-                                 MoveOnlyFunction action);
+                                 MoveOnlyFunction action,
+                                 std::function<void(std::exception_ptr)> on_failure);
     void check_dependent_tasks();
 
     ThreadPool pool_;

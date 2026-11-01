@@ -48,6 +48,11 @@ public:
     std::optional<ExecutableTask> pop();
 
     /**
+     * @brief Pop with stop_token interruption. Unblocks immediately if stop_token is set.
+     */
+    std::optional<ExecutableTask> pop(const std::atomic<bool>& stop_token);
+
+    /**
      * @brief Try to pop a ready task without blocking.
      */
     std::optional<ExecutableTask> try_pop();
@@ -56,6 +61,11 @@ public:
      * @brief Pop with timeout.
      */
     std::optional<ExecutableTask> pop_wait_for(std::chrono::milliseconds timeout);
+
+    /**
+     * @brief Wake all waiting threads on not_empty_cv_ without closing the queue.
+     */
+    void wake_all();
 
     /**
      * @brief Close the queue, unblocking waiting workers.

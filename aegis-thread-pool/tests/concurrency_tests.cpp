@@ -76,3 +76,39 @@ TEST(ConcurrencyTest, DynamicWorkerPoolResize) {
     pool.wait_for_all();
     EXPECT_EQ(completed.load(), 50);
 }
+
+TEST(ConcurrencyTest, ConcurrentWorkerResizingAndPeerAccess) {
+    // Verifies Issue 4: Concurrent resize and work-stealing peer access does not data-race
+    aegis::ThreadPoolConfig config;
+    config.worker_count = 4;
+    config.enable_work_stealing = true;
+    aegis::ThreadPool pool(config);
+
+    std::atomic<bool> stop_flag{false};
+    std::atomic<uint64_t> total_processed{0};
+
+    // Producer thread constantly submitting work-stealing tasks
+    std::thread producer([&pool, &stop_flag, &total_processed]() {
+        while (!stop_flag.load(std::memory_order_relaxed)) {
+            pool.submit(
+                [&total_processed]() { total_processed.fetch_add(1, std::memory_order_relaxed); });
+            std::this_thread::yield();
+        }
+    });
+
+    // Resizer thread repeatedly changing worker counts and peer lists concurrently
+    std::thread resizer([&pool, &stop_flag]() {
+        for (int i = 0; i < 15; ++i) {
+            size_t target_workers = (i % 2 == 0) ? 6 : 2;
+            pool.resize(target_workers);
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        stop_flag.store(true, std::memory_order_relaxed);
+    });
+
+    resizer.join();
+    producer.join();
+
+    pool.wait_for_all();
+    EXPECT_GT(total_processed.load(), 0);
+}

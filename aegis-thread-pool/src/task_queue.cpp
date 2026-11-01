@@ -113,26 +113,24 @@ bool TaskQueue::push(ExecutableTask task) {
                 throw QueueOverflowException();
 
             case OverloadPolicy::DiscardOldest: {
-                // Discard oldest task from lowest priority bucket
+                // Discard oldest task from lowest priority bucket and notify promise
                 bool discarded = false;
                 for (size_t b = 0; b < 4; ++b) {
                     if (!priority_buckets_[b].empty()) {
-                        if (priority_buckets_[b].front().metadata) {
-                            priority_buckets_[b].front().metadata->status.store(
-                                TaskStatus::Cancelled, std::memory_order_relaxed);
-                        }
+                        auto discarded_task = std::move(priority_buckets_[b].front());
                         priority_buckets_[b].pop_front();
                         --ready_count_;
+                        discarded_task.cancel(
+                            "Task discarded due to queue overflow policy (DiscardOldest).");
                         discarded = true;
                         break;
                     }
                 }
                 if (!discarded && !delayed_queue_.empty()) {
-                    if (delayed_queue_.front().metadata) {
-                        delayed_queue_.front().metadata->status.store(TaskStatus::Cancelled,
-                                                                      std::memory_order_relaxed);
-                    }
+                    auto discarded_task = std::move(delayed_queue_.front());
                     delayed_queue_.erase(delayed_queue_.begin());
+                    discarded_task.cancel(
+                        "Task discarded due to queue overflow policy (DiscardOldest).");
                 }
                 break;
             }
@@ -185,6 +183,42 @@ std::optional<ExecutableTask> TaskQueue::pop() {
     }
 }
 
+std::optional<ExecutableTask> TaskQueue::pop(const std::atomic<bool>& stop_token) {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    while (true) {
+        if (stop_token.load(std::memory_order_relaxed)) {
+            return std::nullopt;
+        }
+
+        if (auto task = select_next_task_locked()) {
+            not_full_cv_.notify_one();
+            return task;
+        }
+
+        if (closed_) {
+            return std::nullopt;
+        }
+
+        if (!delayed_queue_.empty()) {
+            auto min_it = std::min_element(delayed_queue_.begin(), delayed_queue_.end(),
+                                           [](const ExecutableTask& a, const ExecutableTask& b) {
+                                               return a.due_time < b.due_time;
+                                           });
+            auto next_due = min_it->due_time;
+            auto now = std::chrono::steady_clock::now();
+            if (next_due > now) {
+                not_empty_cv_.wait_until(lock, next_due);
+            }
+        } else {
+            not_empty_cv_.wait(lock, [this, &stop_token]() {
+                return closed_ || ready_count_ > 0 || !delayed_queue_.empty() ||
+                       stop_token.load(std::memory_order_relaxed);
+            });
+        }
+    }
+}
+
 std::optional<ExecutableTask> TaskQueue::try_pop() {
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
@@ -231,6 +265,11 @@ std::optional<ExecutableTask> TaskQueue::pop_wait_for(std::chrono::milliseconds 
     }
 }
 
+void TaskQueue::wake_all() {
+    not_empty_cv_.notify_all();
+    not_full_cv_.notify_all();
+}
+
 void TaskQueue::close(bool discard_pending) {
     std::vector<ExecutableTask> discarded;
     {
@@ -254,12 +293,7 @@ void TaskQueue::close(bool discard_pending) {
     not_full_cv_.notify_all();
 
     for (auto& task : discarded) {
-        if (task.metadata) {
-            task.metadata->status.store(TaskStatus::Cancelled, std::memory_order_relaxed);
-            if (task.metadata->cancellation_flag) {
-                task.metadata->cancellation_flag->store(true, std::memory_order_relaxed);
-            }
-        }
+        task.cancel("Task cancelled due to thread pool shutdown.");
     }
 }
 

@@ -150,15 +150,29 @@ private:
         meta->priority = priority;
         meta->scheduled_time = due_time;
 
+        auto promise_completed = std::make_shared<std::atomic<bool>>(false);
+        meta->cancel_promise_handler = [t_prom = task_promise,
+                                        promise_completed](const std::string& reason) {
+            bool expected = false;
+            if (promise_completed->compare_exchange_strong(expected, true)) {
+                t_prom->set_exception(std::make_exception_ptr(TaskCancelledException(reason)));
+            }
+        };
+
         {
             std::unique_lock<std::shared_mutex> lock(tasks_map_mutex_);
             tasks_metadata_[tid] = meta;
         }
 
         MoveOnlyFunction wrapped_func = [t_prom = task_promise, b_task = std::move(bound_task),
-                                         metadata = meta]() mutable {
+                                         metadata = meta, promise_completed]() mutable {
             if (metadata->cancellation_flag->load(std::memory_order_relaxed)) {
-                metadata->status.store(TaskStatus::Cancelled, std::memory_order_relaxed);
+                metadata->transition_to_cancelled();
+                bool expected = false;
+                if (promise_completed->compare_exchange_strong(expected, true)) {
+                    t_prom->set_exception(std::make_exception_ptr(
+                        TaskCancelledException("Task was cancelled prior to execution.")));
+                }
                 return;
             }
 
@@ -168,14 +182,24 @@ private:
             try {
                 if constexpr (std::is_void_v<ReturnType>) {
                     b_task();
-                    t_prom->set_value();
+                    bool expected = false;
+                    if (promise_completed->compare_exchange_strong(expected, true)) {
+                        t_prom->set_value();
+                    }
                 } else {
-                    t_prom->set_value(b_task());
+                    auto res = b_task();
+                    bool expected = false;
+                    if (promise_completed->compare_exchange_strong(expected, true)) {
+                        t_prom->set_value(std::move(res));
+                    }
                 }
                 metadata->status.store(TaskStatus::Completed, std::memory_order_relaxed);
             } catch (...) {
                 metadata->status.store(TaskStatus::Failed, std::memory_order_relaxed);
-                t_prom->set_exception(std::current_exception());
+                bool expected = false;
+                if (promise_completed->compare_exchange_strong(expected, true)) {
+                    t_prom->set_exception(std::current_exception());
+                }
             }
 
             metadata->end_time = std::chrono::steady_clock::now();
@@ -184,10 +208,37 @@ private:
         ExecutableTask exec_task(tid, meta, std::move(wrapped_func), due_time);
         metrics_.record_task_submitted();
 
-        bool accepted = queue_.push(std::move(exec_task));
+        bool accepted = false;
+        auto now = std::chrono::steady_clock::now();
+
+        // If work-stealing is enabled and task is not delayed, distribute directly to worker local
+        // queue
+        if (config_.enable_work_stealing && due_time <= now) {
+            std::shared_ptr<Worker> target_worker;
+            {
+                std::lock_guard<std::mutex> lock(workers_mutex_);
+                if (!workers_.empty()) {
+                    size_t idx =
+                        next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % workers_.size();
+                    target_worker = workers_[idx];
+                }
+            }
+            if (target_worker) {
+                accepted = target_worker->push_local(std::move(exec_task));
+            }
+        }
+
         if (!accepted) {
-            meta->status.store(TaskStatus::Cancelled, std::memory_order_relaxed);
-            metrics_.record_task_cancelled();
+            accepted = queue_.push(std::move(exec_task));
+        }
+
+        if (!accepted) {
+            if (meta->transition_to_cancelled()) {
+                metrics_.record_task_cancelled();
+            }
+            if (meta->cancel_promise_handler) {
+                meta->cancel_promise_handler("ThreadPool queue rejected task submission.");
+            }
             throw std::runtime_error("ThreadPool queue rejected task submission.");
         }
 
@@ -203,6 +254,7 @@ private:
 
     std::atomic<bool> is_running_{true};
     std::atomic<TaskId> next_task_id_{1};
+    std::atomic<size_t> next_worker_idx_{0};
 
     mutable std::mutex workers_mutex_;
     std::vector<std::shared_ptr<Worker>> workers_;

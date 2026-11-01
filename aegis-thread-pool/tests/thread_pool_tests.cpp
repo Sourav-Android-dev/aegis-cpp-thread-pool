@@ -79,6 +79,10 @@ TEST(ThreadPoolTest, TaskCancellationBeforeStart) {
     auto status = pool.get_task_status(2);
     ASSERT_TRUE(status.has_value());
     EXPECT_EQ(*status, aegis::TaskStatus::Cancelled);
+
+    // Calling future.get() on a cancelled task must throw TaskCancelledException, NOT
+    // broken_promise
+    EXPECT_THROW({ future.get(); }, aegis::TaskCancelledException);
 }
 
 TEST(ThreadPoolTest, BoundedQueueWithRejectPolicy) {
@@ -112,4 +116,47 @@ TEST(ThreadPoolTest, BoundedQueueWithRejectPolicy) {
 
     allow_blocker_exit.store(true);
     pool.wait_for_all();
+}
+
+TEST(ThreadPoolTest, DynamicResizeDownOnEmptyQueueNeverHangs) {
+    // Verifies Issue 1: reducing worker count when queue is empty must not hang
+    aegis::ThreadPool pool(6);
+    EXPECT_EQ(pool.worker_count(), 6);
+
+    // Queue is completely empty; downsize from 6 to 2 workers
+    pool.resize(2);
+    EXPECT_EQ(pool.worker_count(), 2);
+
+    // Verify pool remains functional after downsizing
+    auto fut = pool.submit([]() { return 123; });
+    EXPECT_EQ(fut.get(), 123);
+}
+
+TEST(ThreadPoolTest, CancellationMetricsExactlyOnce) {
+    // Verifies Issue 6: cancelled task metrics are counted exactly once
+    aegis::ThreadPoolConfig config;
+    config.worker_count = 1;
+    aegis::ThreadPool pool(config);
+
+    // Blocker to hold the single worker
+    auto blocker =
+        pool.submit([]() { std::this_thread::sleep_for(std::chrono::milliseconds{50}); });
+
+    auto f1 = pool.submit([]() { return 1; });
+    auto f2 = pool.submit([]() { return 2; });
+
+    // Cancel task 2 and 3
+    EXPECT_TRUE(pool.cancel(2));
+    EXPECT_TRUE(pool.cancel(3));
+
+    // Redundant cancel on already cancelled task must return false
+    EXPECT_FALSE(pool.cancel(2));
+
+    blocker.get();
+    pool.wait_for_all();
+
+    auto snap = pool.metrics();
+    EXPECT_EQ(snap.cancelled_tasks, 2);
+    EXPECT_THROW(f1.get(), aegis::TaskCancelledException);
+    EXPECT_THROW(f2.get(), aegis::TaskCancelledException);
 }

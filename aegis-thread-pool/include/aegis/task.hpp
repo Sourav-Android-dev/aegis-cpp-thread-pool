@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -15,6 +16,15 @@ namespace aegis {
 
 using TaskId = uint64_t;
 inline constexpr TaskId INVALID_TASK_ID = 0;
+
+/**
+ * @brief Exception thrown when accessing a future of a cancelled task.
+ */
+class TaskCancelledException : public std::runtime_error {
+public:
+    TaskCancelledException() : std::runtime_error("Task was cancelled prior to execution.") {}
+    explicit TaskCancelledException(const std::string& msg) : std::runtime_error(msg) {}
+};
 
 /**
  * @brief Move-only type-erased callable abstraction supporting move-only captures.
@@ -73,11 +83,32 @@ struct TaskMetadata {
     std::chrono::steady_clock::time_point end_time;
 
     std::shared_ptr<std::atomic<bool>> cancellation_flag;
+    std::function<void(const std::string&)> cancel_promise_handler;
 
     TaskMetadata()
         : submission_time(std::chrono::steady_clock::now()),
           scheduled_time(submission_time),
           cancellation_flag(std::make_shared<std::atomic<bool>>(false)) {}
+
+    /**
+     * @brief Atomically transition status to Cancelled exactly once.
+     * @return true if this call performed the transition, false if already terminal.
+     */
+    bool transition_to_cancelled() noexcept {
+        TaskStatus current = status.load(std::memory_order_relaxed);
+        while (current != TaskStatus::Completed && current != TaskStatus::Failed &&
+               current != TaskStatus::Cancelled) {
+            if (status.compare_exchange_weak(current, TaskStatus::Cancelled,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_relaxed)) {
+                if (cancellation_flag) {
+                    cancellation_flag->store(true, std::memory_order_release);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 /**
@@ -109,6 +140,14 @@ struct ExecutableTask {
     [[nodiscard]] bool is_cancelled() const noexcept {
         return metadata && metadata->cancellation_flag &&
                metadata->cancellation_flag->load(std::memory_order_relaxed);
+    }
+
+    void cancel(const std::string& reason = "Task was cancelled.") {
+        if (metadata && metadata->transition_to_cancelled()) {
+            if (metadata->cancel_promise_handler) {
+                metadata->cancel_promise_handler(reason);
+            }
+        }
     }
 
     /**

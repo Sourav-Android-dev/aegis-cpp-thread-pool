@@ -100,3 +100,55 @@ TEST(SchedulerTest, TaskDependenciesDAG) {
     EXPECT_EQ(dep_fut.get(), 999);
     EXPECT_TRUE(dependent_saw_prereqs.load());
 }
+
+TEST(SchedulerTest, TaskDependenciesDAG_PrerequisiteFailedPropagates) {
+    // Verifies Issue 5: When prerequisite task fails, dependent task receives exception and
+    // wait_all() does not hang
+    aegis::Scheduler scheduler(2);
+
+    auto f_fail = scheduler.schedule(
+        []() -> int { throw std::runtime_error("Simulated prerequisite failure"); });
+
+    // Prerequisite task 1 will fail
+    auto dep_fut = scheduler.schedule_dependent({1}, aegis::Priority::High, []() { return 42; });
+
+    EXPECT_THROW(f_fail.get(), std::runtime_error);
+    EXPECT_THROW(dep_fut.get(), std::runtime_error);
+
+    // wait_all() must terminate quickly without hanging
+    scheduler.wait_all();
+}
+
+TEST(SchedulerTest, TaskDependenciesDAG_PrerequisiteCancelledPropagates) {
+    // Verifies Issue 5: When prerequisite is cancelled, dependent task receives
+    // TaskCancelledException
+    aegis::ThreadPoolConfig config;
+    config.worker_count = 1;
+    aegis::Scheduler scheduler(config);
+
+    // Blocker to let us cancel task 2
+    auto blocker =
+        scheduler.schedule([]() { std::this_thread::sleep_for(std::chrono::milliseconds{40}); });
+
+    auto f_to_cancel = scheduler.schedule([]() { return 100; });
+    EXPECT_TRUE(scheduler.cancel(2));
+
+    auto dep_fut = scheduler.schedule_dependent({2}, aegis::Priority::High, []() { return 200; });
+
+    blocker.get();
+    EXPECT_THROW(f_to_cancel.get(), aegis::TaskCancelledException);
+    EXPECT_THROW(dep_fut.get(), aegis::TaskCancelledException);
+
+    scheduler.wait_all();
+}
+
+TEST(SchedulerTest, TaskDependenciesDAG_InvalidDependencyIdFails) {
+    // Verifies Issue 5: Invalid prerequisite task ID fails fast and doesn't hang wait_all()
+    aegis::Scheduler scheduler(2);
+
+    auto dep_fut =
+        scheduler.schedule_dependent({99999}, aegis::Priority::Normal, []() { return 1; });
+
+    EXPECT_THROW(dep_fut.get(), std::runtime_error);
+    scheduler.wait_all();
+}
