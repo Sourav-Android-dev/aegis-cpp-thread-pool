@@ -1,0 +1,89 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default Debug",
+      "description": "Standard Debug build with symbols and testing",
+      "binaryDir": "${sourceDir}/build/default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AEGIS_BUILD_TESTS": "ON",
+        "AEGIS_BUILD_BENCHMARKS": "ON",
+        "AEGIS_BUILD_EXAMPLES": "ON",
+        "AEGIS_BUILD_APPS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release Optimized",
+      "description": "High performance release build with -O3 optimizations",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AEGIS_BUILD_TESTS": "ON",
+        "AEGIS_BUILD_BENCHMARKS": "ON",
+        "AEGIS_BUILD_EXAMPLES": "ON",
+        "AEGIS_BUILD_APPS": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "description": "Build with ThreadSanitizer enabled for race detection",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "AEGIS_ENABLE_TSAN": "ON",
+        "AEGIS_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer",
+      "description": "Build with AddressSanitizer and UndefinedBehaviorSanitizer",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AEGIS_ENABLE_ASAN": "ON",
+        "AEGIS_ENABLE_UBSAN": "ON",
+        "AEGIS_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

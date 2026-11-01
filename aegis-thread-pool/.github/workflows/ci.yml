@@ -1,0 +1,98 @@
+name: Aegis CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }} - ${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            compiler: gcc-12
+            c_compiler: gcc-12
+            cxx_compiler: g++-12
+            build_type: Release
+          - os: ubuntu-22.04
+            compiler: clang-14
+            c_compiler: clang-14
+            cxx_compiler: clang++-14
+            build_type: Release
+          - os: macos-13
+            compiler: apple-clang
+            c_compiler: clang
+            cxx_compiler: clang++
+            build_type: Release
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libgtest-dev libbenchmark-dev clang-tidy clang-format
+
+      - name: Install Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake ninja googletest google-benchmark llvm
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx_compiler }} \
+            -DAEGIS_BUILD_TESTS=ON \
+            -DAEGIS_BUILD_BENCHMARKS=ON \
+            -DAEGIS_BUILD_EXAMPLES=ON \
+            -DAEGIS_BUILD_APPS=ON
+
+      - name: Build All Targets
+        run: cmake --build build --parallel
+
+      - name: Run Unit Tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run Basic Example
+        run: ./build/basic_example
+
+      - name: Run CLI Demo
+        run: ./build/aegis_cli --workers 4 --tasks 1000
+
+  sanitizers:
+    name: Sanitizers (TSan / ASan)
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        sanitizer: [tsan, asan]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12 cmake libgtest-dev
+
+      - name: Configure with ${{ matrix.sanitizer }}
+        run: |
+          if [ "${{ matrix.sanitizer }}" = "tsan" ]; then
+            cmake -B build -DAEGIS_ENABLE_TSAN=ON -DAEGIS_BUILD_TESTS=ON -DAEGIS_BUILD_BENCHMARKS=OFF
+          else
+            cmake -B build -DAEGIS_ENABLE_ASAN=ON -DAEGIS_ENABLE_UBSAN=ON -DAEGIS_BUILD_TESTS=ON -DAEGIS_BUILD_BENCHMARKS=OFF
+          fi
+
+      - name: Build Tests with Sanitizer
+        run: cmake --build build --target aegis_tests --parallel
+
+      - name: Run Tests under Sanitizer
+        run: ./build/aegis_tests

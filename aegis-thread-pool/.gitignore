@@ -1,0 +1,14 @@
+build/
+bin/
+lib/
+*.o
+*.a
+*.so
+*.dylib
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+*.dSYM/
+Testing/
+CMakeUserPresets.json

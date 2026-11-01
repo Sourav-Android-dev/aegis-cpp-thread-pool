@@ -1,0 +1,6 @@
+{
+  "name": "Aegis Thread Pool & Scheduler",
+  "description": "High-Performance C++ Thread Pool and Task Scheduling Engine with comprehensive testing, benchmarks, and architectural documentation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
